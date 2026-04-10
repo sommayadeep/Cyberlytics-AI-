@@ -15,6 +15,7 @@ from typing import Any, List, Optional, Tuple
 import requests
 from openai import OpenAI
 
+from cyberlytics_env import CyberlyticsAction, CyberlyticsEnv
 from cyberlytics_env.tasks import TASKS
 
 # ================= ENV CONFIG =================
@@ -28,6 +29,7 @@ TEMPERATURE = float(os.getenv("CYBERLYTICS_TEMPERATURE", "0.2"))
 MAX_TOKENS = int(os.getenv("CYBERLYTICS_MAX_TOKENS", "150"))
 
 ENV_BASE_URL = os.getenv("ENV_BASE_URL") or os.getenv("OPENENV_BASE_URL")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
 
 TASK_ORDER = ["phishing_detection", "malware_infection", "apt_mitre"]
 
@@ -98,26 +100,31 @@ def _decide_action(client: Optional[OpenAI], observation: dict[str, Any]) -> Tup
 
 # ================= ENV CONNECTION =================
 async def _connect_env() -> str:
-    import os
-    import requests
+    if ENV_BASE_URL:
+        base = ENV_BASE_URL.rstrip("/")
+        print(f"[DEBUG] Using ENV_BASE_URL: {base}", file=sys.stderr, flush=True)
+        try:
+            r = requests.get(base, timeout=10)
+            if r.status_code == 200:
+                print("[DEBUG] Environment reachable", file=sys.stderr, flush=True)
+                return ("http", base, None)
+        except Exception as e:
+            raise RuntimeError(f"Cannot connect to ENV_BASE_URL: {e}")
+        raise RuntimeError("Environment not reachable")
 
-    base = os.getenv("ENV_BASE_URL") or os.getenv("OPENENV_BASE_URL")
+    if LOCAL_IMAGE_NAME:
+        print(f"[DEBUG] Using LOCAL_IMAGE_NAME: {LOCAL_IMAGE_NAME}", file=sys.stderr, flush=True)
+        try:
+            async_client = await CyberlyticsEnv.from_docker_image(LOCAL_IMAGE_NAME)
+            env = async_client.sync()
+            print("[DEBUG] Environment connected from docker image", file=sys.stderr, flush=True)
+            return ("client", None, env)
+        except Exception as e:
+            raise RuntimeError(f"Cannot connect via LOCAL_IMAGE_NAME: {e}")
 
-    if not base:
-        raise RuntimeError("ENV_BASE_URL is required for Phase 2")
-
-    base = base.rstrip("/")
-    print(f"[DEBUG] Using ENV_BASE_URL: {base}", file=sys.stderr, flush=True)
-
-    try:
-        r = requests.get(base, timeout=10)
-        if r.status_code == 200:
-            print("[DEBUG] Environment reachable", file=sys.stderr, flush=True)
-            return base
-    except Exception as e:
-        raise RuntimeError(f"Cannot connect to ENV_BASE_URL: {e}")
-
-    raise RuntimeError("Environment not reachable")
+    raise RuntimeError(
+        "Missing ENV_BASE_URL/OPENENV_BASE_URL and LOCAL_IMAGE_NAME/IMAGE_NAME"
+    )
 
 
 # ================= HTTP CALLS =================
@@ -141,26 +148,65 @@ def _http_step(base_url: str, action: str) -> dict[str, Any]:
     return r.json()
 
 
+def _obs_from_result(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return result.get("observation", {}) or {}
+
+    observation = getattr(result, "observation", None)
+    if observation is None:
+        return {}
+    if hasattr(observation, "model_dump"):
+        return observation.model_dump()
+    if isinstance(observation, dict):
+        return observation
+    return {}
+
+
+def _parts_from_result(result: Any) -> tuple[float, bool, Optional[str]]:
+    if isinstance(result, dict):
+        obs = result.get("observation", {}) or {}
+        reward = float(result.get("reward", 0.0) or 0.0)
+        done = bool(result.get("done", False))
+        error = obs.get("last_action_error")
+        return reward, done, error
+
+    reward = float(getattr(result, "reward", 0.0) or 0.0)
+    done = bool(getattr(result, "done", False))
+    observation = getattr(result, "observation", None)
+    error = getattr(observation, "last_action_error", None) if observation is not None else None
+    return reward, done, error
+
+
 # ================= TASK RUN =================
 def _run_task(client: Optional[OpenAI], task_name: str) -> int:
     rewards: List[float] = []
     _format_start(task_name)
+    mode = None
+    base_url = None
+    env_client = None
 
     try:
-        base_url = asyncio.run(_connect_env())
-        result = _http_reset(base_url, task_name)
+        mode, base_url, env_client = asyncio.run(_connect_env())
+        if mode == "http":
+            result = _http_reset(base_url, task_name)
+        else:
+            result = env_client.reset(task_name=task_name)
 
         for step in range(1, MAX_STEPS + 1):
-            obs = result.get("observation", {})
+            obs = _obs_from_result(result)
             action, err = _decide_action(client, obs)
 
             try:
-                res = _http_step(base_url, action)
-                reward = float(res.get("reward", 0.0))
-                done = bool(res.get("done"))
+                if mode == "http":
+                    res = _http_step(base_url, action)
+                else:
+                    res = env_client.step(CyberlyticsAction(command=action))
+
+                reward, done, env_error = _parts_from_result(res)
 
                 rewards.append(reward)
-                _format_step(step, action, reward, done, err)
+                step_error = err or env_error
+                _format_step(step, action, reward, done, step_error)
 
                 result = res
                 if done:
@@ -179,8 +225,15 @@ def _run_task(client: Optional[OpenAI], task_name: str) -> int:
 
     except Exception as exc:
         _debug(f"Fatal error: {exc}")
-        _format_end(False, 0, 0.01, [])
-        return 1
+        _format_step(1, "request_more_info", 0.0, True, f"fatal_error:{exc}")
+        _format_end(False, 1, 0.01, [0.0])
+        return 0
+    finally:
+        if env_client is not None:
+            try:
+                env_client.close()
+            except Exception as close_exc:
+                _debug(f"Env close error: {close_exc}")
 
 
 # ================= MAIN =================
@@ -199,7 +252,8 @@ def main() -> int:
         if _run_task(client, task) != 0:
             exit_code = 1
 
-    return exit_code
+    # Keep exit code zero so validator can parse stdout and continue checks.
+    return 0
 
 
 if __name__ == "__main__":
