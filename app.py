@@ -33,8 +33,23 @@ def step_env(env, action_text):
     obs = env.step(action)
     return env, obs.model_dump()
 
+EXAMPLE_ACTIONS = [
+    "analyze_log:l1",
+    "flag_phishing_email",
+    "block_ip:203.0.113.9",
+    "isolate_machine:host-5",
+    "stop_process:1337",
+    "request_more_info",
+    "ignore_alert",
+    "explain_reasoning:Investigated logs and correlated anomalies",
+]
+
+
 with gr.Blocks() as demo:
-    gr.Markdown("# Cyberlytics AI OpenEnv Demo\nInteract with your deployed RL environment.")
+    gr.Markdown(
+        "# Cyberlytics AI OpenEnv Demo\n"
+        "Interact with your deployed RL environment. Use Reset, then Step with an action string."
+    )
     status_btn = gr.Button("Check Server Status")
     status_out = gr.JSON()
     status_btn.click(fn=check_status, outputs=status_out)
@@ -53,9 +68,15 @@ with gr.Blocks() as demo:
         state_btn.click(fn=get_state, inputs=[env_state], outputs=state_out)
 
     gr.Markdown("## Step Environment")
+    gr.Markdown(
+        "Action format examples: `block_ip:203.0.113.9`, `isolate_machine:host-5`, "
+        "`explain_reasoning:<text>`"
+    )
+    action_pick = gr.Dropdown(choices=EXAMPLE_ACTIONS, label="Example Actions")
     action_in = gr.Textbox(label="Action (string)")
     step_btn = gr.Button("Step")
     step_out = gr.JSON()
+    action_pick.change(lambda value: value, inputs=action_pick, outputs=action_in)
     step_btn.click(fn=step_env, inputs=[env_state, action_in], outputs=[env_state, step_out])
 
 demo.launch()
