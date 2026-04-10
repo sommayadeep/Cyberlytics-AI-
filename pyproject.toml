@@ -14,6 +14,7 @@ dependencies = [
     "uvicorn>=0.24.0",
     "requests>=2.31.0",
     "openai>=1.40.0",
+    "gradio>=4.25.0",
 ]
 
 [project.optional-dependencies]
