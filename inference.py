@@ -17,7 +17,7 @@ BENCHMARK = os.getenv("CYBERLYTICS_BENCHMARK", "cyberlytics_env")
 MAX_STEPS = int(os.getenv("CYBERLYTICS_MAX_STEPS", "8"))
 TEMPERATURE = float(os.getenv("CYBERLYTICS_TEMPERATURE", "0.2"))
 MAX_TOKENS = int(os.getenv("CYBERLYTICS_MAX_TOKENS", "150"))
-IMAGE_NAME = os.getenv("IMAGE_NAME", "cyberlytics-env:latest")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 
 def _format_start(task_name: str) -> None:
@@ -75,9 +75,13 @@ def main() -> int:
         print("Missing HF_TOKEN or API_KEY", file=sys.stderr)
         return 1
 
+    if not LOCAL_IMAGE_NAME:
+        print("Missing LOCAL_IMAGE_NAME", file=sys.stderr)
+        return 1
+
     client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
 
-    async_client = asyncio.run(CyberlyticsEnv.from_docker_image(IMAGE_NAME))
+    async_client = asyncio.run(CyberlyticsEnv.from_docker_image(LOCAL_IMAGE_NAME))
     env = async_client.sync()
     rewards: List[float] = []
 
