@@ -7,7 +7,7 @@ colorTo: yellow
 sdk: docker
 pinned: false
 short_description: OpenEnv RL environment for cybersecurity incident response.
-app_port: 8000
+app_port: 7860
 author: sommayadeep
 tags:
   - openenv
