@@ -33,7 +33,18 @@ uv run --project . server
 In another terminal, run the baseline inference script:
 
 ```bash
-API_BASE_URL=http://localhost:8000 \
+ENV_BASE_URL=http://localhost:8000 \
+API_BASE_URL=https://router.huggingface.co/v1 \
+MODEL_NAME=Qwen/Qwen2.5-72B-Instruct \
+HF_TOKEN=your_token_here \
+python inference.py
+```
+
+Run inference against the deployed Hugging Face Space:
+
+```bash
+ENV_BASE_URL=https://sommayadeep-cyberlytics-ai.hf.space \
+API_BASE_URL=https://router.huggingface.co/v1 \
 MODEL_NAME=Qwen/Qwen2.5-72B-Instruct \
 HF_TOKEN=your_token_here \
 python inference.py
