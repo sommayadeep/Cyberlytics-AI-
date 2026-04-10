@@ -4,7 +4,7 @@ title: Cyberlytics AI
 emoji: 🔥
 colorFrom: blue
 colorTo: yellow
-sdk: gradio
+sdk: docker
 pinned: false
 short_description: OpenEnv RL environment for cybersecurity incident response.
 app_port: 7860

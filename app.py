@@ -48,7 +48,7 @@ EXAMPLE_ACTIONS = [
 with gr.Blocks() as demo:
     gr.Markdown(
         "# Cyberlytics AI OpenEnv Demo\n"
-        "Interact with your deployed RL environment. Use Reset, then Step with an action string."
+        "This UI is intended for local use. The deployed UI is served at /ui on the Space."
     )
     status_btn = gr.Button("Check Server Status")
     status_out = gr.JSON()
