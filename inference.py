@@ -1,23 +1,30 @@
-"""Baseline inference script for Cyberlytics AI."""
+"""Phase 2 inference script for Cyberlytics AI.
+
+Emits strict START/STEP/END logs and handles validator/runtime failures
+gracefully without unhandled crashes.
+"""
 
 import asyncio
 import os
 import sys
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
+import requests
 from openai import OpenAI
 
-from cyberlytics_env import CyberlyticsAction, CyberlyticsEnv
+from cyberlytics_env.tasks import TASKS
 
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
-TASK_NAME = os.getenv("CYBERLYTICS_TASK", "phishing_detection")
 BENCHMARK = os.getenv("CYBERLYTICS_BENCHMARK", "cyberlytics_env")
 MAX_STEPS = int(os.getenv("CYBERLYTICS_MAX_STEPS", "8"))
 TEMPERATURE = float(os.getenv("CYBERLYTICS_TEMPERATURE", "0.2"))
 MAX_TOKENS = int(os.getenv("CYBERLYTICS_MAX_TOKENS", "150"))
 ENV_BASE_URL = os.getenv("ENV_BASE_URL") or os.getenv("OPENENV_BASE_URL")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME") or os.getenv("IMAGE_NAME")
+TASK_ORDER = ["phishing_detection", "malware_infection", "apt_mitre"]
+SPACE_URL = os.getenv("SPACE_URL") or os.getenv("HF_SPACE_URL")
 
 
 def _debug(message: str) -> None:
@@ -47,10 +54,14 @@ def _format_end(success: bool, steps: int, score: float, rewards: List[float]) -
 
 
 def _clip_score(value: float) -> float:
-    return max(0.0, min(value, 1.0))
+    # Keep score strictly between 0 and 1 for validator/display constraints.
+    return max(0.01, min(value, 0.99))
 
 
-def _decide_action(client: OpenAI, observation: dict) -> Tuple[str, Optional[str]]:
+def _decide_action(client: Optional[OpenAI], observation: dict[str, Any]) -> Tuple[str, Optional[str]]:
+    if client is None:
+        return "request_more_info", "missing_api_key"
+
     system_prompt = (
         "You are a SOC analyst AI. Choose exactly one action command from the allowed list. "
         "Allowed: analyze_log:<log_id>, flag_phishing_email, block_ip:<ip>, "
@@ -84,83 +95,134 @@ def _decide_action(client: OpenAI, observation: dict) -> Tuple[str, Optional[str
     except Exception as exc:
         # Fallback action keeps episode moving when model/network fails.
         _debug(f"Model call failed, using fallback action: {exc}")
-        return "request_more_info", str(exc)
+        return "request_more_info", f"model_error:{exc}"
 
 
-async def _connect_env(base_url: str):
-    if not base_url:
-        raise RuntimeError("Missing ENV_BASE_URL or OPENENV_BASE_URL")
+async def _connect_env() -> str:
+    url_candidates = [
+        ENV_BASE_URL,
+        SPACE_URL,
+        "http://127.0.0.1:8000",
+        "http://localhost:8000",
+    ]
 
-    _debug(f"ENV_BASE_URL={base_url}")
+    for candidate in url_candidates:
+        if not candidate:
+            continue
+        _debug(f"Trying env URL: {candidate}")
+        try:
+            response = requests.get(f"{candidate.rstrip('/')}/health", timeout=10)
+            if response.status_code == 200:
+                _debug("Environment reachable via URL")
+                return candidate
+        except Exception as exc:
+            _debug(f"URL connection failed: {exc}")
 
-    try:
-        # Prefer from_url per OpenEnv guidance; fallback keeps compatibility
-        # with environments exposing from_base_url.
-        if hasattr(CyberlyticsEnv, "from_url"):
-            async_client = await CyberlyticsEnv.from_url(base_url)
-        else:
-            async_client = await CyberlyticsEnv.from_base_url(base_url)
-        _debug("Environment connected successfully")
-        return async_client.sync()
-    except Exception as exc:
-        _debug(f"Environment connection failed: {exc}")
-        raise
+    if LOCAL_IMAGE_NAME:
+        _debug(
+            "LOCAL_IMAGE_NAME is set but URL is required for Phase 2. "
+            "Provide ENV_BASE_URL or OPENENV_BASE_URL."
+        )
+
+    raise RuntimeError(
+        "Could not connect to environment via URL. Missing ENV_BASE_URL/OPENENV_BASE_URL"
+    )
 
 
-def main() -> int:
-    rewards: List[float] = []
-    env = None
-    _format_start(TASK_NAME)
+def _http_reset(base_url: str, task_name: str) -> dict[str, Any]:
+    response = requests.post(
+        f"{base_url.rstrip('/')}/reset",
+        json={"task_name": task_name},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
 
+
+def _http_step(base_url: str, action: str) -> dict[str, Any]:
+    response = requests.post(
+        f"{base_url.rstrip('/')}/step",
+        json={"action": {"command": action}},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _build_client() -> Optional[OpenAI]:
     if not API_KEY:
-        _debug("Missing HF_TOKEN or API_KEY")
-        _format_end(False, 0, 0.0, rewards)
-        return 1
+        _debug("Missing HF_TOKEN or API_KEY; using fallback actions")
+        return None
+    try:
+        return OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+    except Exception as exc:
+        _debug(f"OpenAI client init failed: {exc}")
+        return None
 
-    client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+
+def _run_task(client: Optional[OpenAI], task_name: str) -> int:
+    rewards: List[float] = []
+    env_base_url: Optional[str] = None
+    done = False
+    _format_start(task_name)
 
     try:
-        env = asyncio.run(_connect_env(ENV_BASE_URL))
-        result = env.reset(task_name=TASK_NAME)
-        done = False
+        env_base_url = asyncio.run(_connect_env())
+        result = _http_reset(env_base_url, task_name)
 
         for step in range(1, MAX_STEPS + 1):
-            action_text, model_error = _decide_action(client, result.observation.model_dump())
-
+            observation = result.get("observation", {})
+            action_text, model_error = _decide_action(client, observation)
             try:
-                step_result = env.step(CyberlyticsAction(command=action_text))
-                reward = float(step_result.reward or 0.0)
+                step_result = _http_step(env_base_url, action_text)
+                reward = float(step_result.get("reward") or 0.0)
                 rewards.append(reward)
-                done = bool(step_result.done)
+                done = bool(step_result.get("done"))
 
-                step_error = step_result.observation.last_action_error
+                step_error = (step_result.get("observation") or {}).get("last_action_error")
                 if model_error and not step_error:
-                    step_error = f"model_error:{model_error}"
+                    step_error = model_error
 
                 _format_step(step, action_text, reward, done, step_error)
                 result = step_result
                 if done:
                     break
             except Exception as exc:
-                _debug(f"Step {step} failed: {exc}")
+                _debug(f"Step {step} failed for task={task_name}: {exc}")
                 rewards.append(0.0)
                 _format_step(step, action_text, 0.0, False, f"step_error:{exc}")
                 break
 
-        score = sum(rewards) / max(len(rewards), 1)
+        raw_score = sum(rewards) / max(len(rewards), 1)
+        score = _clip_score(raw_score)
         success = done and score > 0.2
-        _format_end(success, len(rewards), _clip_score(score), rewards)
+        _format_end(success, len(rewards), score, rewards)
         return 0
     except Exception as exc:
-        _debug(f"Fatal inference error: {exc}")
-        _format_end(False, len(rewards), 0.0, rewards)
+        _debug(f"Fatal task error for task={task_name}: {exc}")
+        _format_end(False, len(rewards), _clip_score(0.0), rewards)
         return 1
-    finally:
-        if env is not None:
-            try:
-                env.close()
-            except Exception as close_exc:
-                _debug(f"Environment close failed: {close_exc}")
+
+
+def main() -> int:
+    client = _build_client()
+    exit_code = 0
+
+    # Ensure all required tasks are evaluated in sequence.
+    for task_name in TASK_ORDER:
+        if task_name not in TASKS:
+            _debug(f"Task not found in TASKS: {task_name}")
+            _format_start(task_name)
+            _format_step(1, "request_more_info", 0.0, True, "task_not_found")
+            _format_end(False, 1, _clip_score(0.0), [0.0])
+            exit_code = 1
+            continue
+
+        task_code = _run_task(client, task_name)
+        if task_code != 0:
+            exit_code = 1
+
+    return exit_code
 
 
 if __name__ == "__main__":
