@@ -15,6 +15,7 @@ except ModuleNotFoundError:
     from server.cyberlytics_environment import CyberlyticsEnvironment
 
 
+
 app = create_app(
     CyberlyticsEnvironment,
     CyberlyticsAction,
@@ -22,6 +23,12 @@ app = create_app(
     env_name="cyberlytics_env",
     max_concurrent_envs=1,
 )
+
+# Add root endpoint for Hugging Face health check
+from fastapi import Request
+@app.get("/")
+async def root(request: Request):
+    return {"status": "Cyberlytics AI OpenEnv is running"}
 
 
 def main(host: str = "0.0.0.0", port: int = 8000):
