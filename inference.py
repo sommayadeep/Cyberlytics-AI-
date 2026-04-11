@@ -19,8 +19,9 @@ from cyberlytics_env import CyberlyticsAction, CyberlyticsEnv
 from cyberlytics_env.tasks import TASKS
 
 # ================= ENV CONFIG =================
-API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
-API_BASE_URL = os.getenv("API_BASE_URL", "https://router.huggingface.co/v1")
+# Prefer validator-injected proxy credentials.
+API_KEY = os.getenv("API_KEY") or os.getenv("HF_TOKEN")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 
 BENCHMARK = os.getenv("CYBERLYTICS_BENCHMARK", "cyberlytics_env")
@@ -70,7 +71,14 @@ def _build_client() -> Optional[OpenAI]:
     if not API_KEY:
         _debug("No API key → using fallback actions")
         return None
+    if not os.getenv("API_BASE_URL"):
+        _debug("API_BASE_URL not set by environment; using default router URL")
     try:
+        if os.getenv("API_KEY"):
+            _debug("Using API_KEY from environment (validator proxy key)")
+        else:
+            _debug("API_KEY missing; falling back to HF_TOKEN")
+        _debug(f"Using API_BASE_URL={API_BASE_URL}")
         return OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
     except Exception as exc:
         _debug(f"Client init failed: {exc}")
