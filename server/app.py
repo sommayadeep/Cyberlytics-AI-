@@ -70,7 +70,7 @@ def _build_ui():
     with gr.Blocks() as demo:
         gr.Markdown(
             "# Cyberlytics AI OpenEnv Demo\n"
-            "Use the OpenEnv API at /reset, /step, /state. UI is available at /ui."
+            "Use the OpenEnv API at /reset, /step, /state. UI is available at /."
         )
         env_state = gr.State(_init_env())
         task_picker = gr.Dropdown(choices=task_choices, value=task_choices[0], label="Task")
@@ -95,20 +95,28 @@ def _build_ui():
     return demo
 
 
-app = gr.mount_gradio_app(app, _build_ui(), path="/ui")
-
-
 # Add root endpoint for Hugging Face health check
 from fastapi import Request
-@app.get("/")
+
+@app.get("/health")
 async def root(request: Request):
     return {"status": "Cyberlytics AI OpenEnv is running"}
 
 
-def main(host: str = "0.0.0.0", port: int = 8000):
+# Use a separate app for Gradio to avoid root conflicts
+app = gr.mount_gradio_app(app, _build_ui(), path="/")
+
+
+def main():
+    import argparse
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+
+    uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
